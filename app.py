@@ -278,20 +278,19 @@ def predict():
 @app.route('/rank-data',methods=["GET"])#rank endpoint for ranking exoplanets based on habitability probability
 def rank():
     try:
-        # Use SQLAlchemy connection context manager for proper pooling
-        with engine.connect() as conn:
-            df = pd.read_sql(text("""
-                SELECT id, radius, mass, temp, habitability_probability 
-                FROM exoplanets 
-                ORDER BY habitability_probability DESC
-            """), conn)
-            
-            df = df.fillna(0)
-            df["rank"] = range(1, len(df) + 1)
-            
-            return jsonify({
-                "planets": df.to_dict(orient="records")
-            })
+        query_str = """
+            SELECT id, radius, mass, temp, habitability_probability 
+            FROM exoplanets 
+            ORDER BY habitability_probability DESC
+        """
+
+        df = pd.read_sql_query(query_str, engine)
+        df = df.fillna(0)
+        df["rank"] = range(1, len(df) + 1)
+
+        return jsonify({
+            "planets": df.to_dict(orient="records")
+        })
     except Exception as e:
         print(f"❌ Query failed: {e}")
         return jsonify({"error": "Failed to fetch ranking data"}), 500

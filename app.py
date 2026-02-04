@@ -20,6 +20,13 @@ CORS(app) #Cross-Origin Resource Sharing to allow requests from different origin
 DB_URL = f"postgresql://{os.getenv('DB_USER')}:{quote_plus(os.getenv('DB_PASSWORD'))}@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/{os.getenv('DB_NAME')}"
 engine = create_engine(DB_URL, pool_pre_ping=True, pool_recycle=3600)
 
+
+def fetch_df(query, params=None):
+    with engine.connect() as conn:
+        result = conn.execute(text(query), params or {})
+        rows = result.fetchall()
+        return pd.DataFrame(rows, columns=result.keys())
+
 # --- Model Loading with joblib and xgboost.Booster ---
 preprocessor = joblib.load("preprocessor.pkl")
 model = xgb.Booster()
@@ -284,7 +291,7 @@ def rank():
             ORDER BY habitability_probability DESC
         """
 
-        df = pd.read_sql_query(query_str, engine)
+        df = fetch_df(query_str)
         df = df.fillna(0)
         df["rank"] = range(1, len(df) + 1)
 
@@ -297,18 +304,16 @@ def rank():
 
 @app.route('/planet/<int:planet_id>', methods=["GET"])
 def planet_detail(planet_id):
-    with engine.connect() as conn:
-        df = pd.read_sql(
-            text("""
-            SELECT id, radius, mass, temp, orbital_period, distance_star, star_temp,
-                   eccentricity, semi_major_axis, star_type, habitability_probability
-            FROM exoplanets
-            WHERE id = :planet_id
-            LIMIT 1
-            """),
-            conn,
-            params={"planet_id": planet_id}
-        )
+    df = fetch_df(
+        """
+        SELECT id, radius, mass, temp, orbital_period, distance_star, star_temp,
+               eccentricity, semi_major_axis, star_type, habitability_probability
+        FROM exoplanets
+        WHERE id = :planet_id
+        LIMIT 1
+        """,
+        {"planet_id": planet_id}
+    )
 
     if df.empty:
         return jsonify({"error": "Planet not found"}), 404
@@ -346,11 +351,10 @@ def predict_input():
 @app.route("/planets", methods=["GET"])#endpoint to fetch exoplanet data from database
 def get_planets():
     try:
-        with engine.connect() as conn:
-            df = pd.read_sql(text("SELECT * FROM exoplanets LIMIT 10;"), conn)
-            return jsonify({
-                "planets": df.to_dict(orient="records")
-            })
+        df = fetch_df("SELECT * FROM exoplanets LIMIT 10;")
+        return jsonify({
+            "planets": df.to_dict(orient="records")
+        })
     except Exception as e:
         print(f"❌ Query failed: {e}")
         return jsonify({"error": "Failed to fetch planets"}), 500
@@ -437,12 +441,11 @@ def feature_importance():
 @app.route("/score-distribution",methods=["GET"])#score distribution endpoint
 def score_distribution():
     try:
-        with engine.connect() as conn:
-            df=pd.read_sql(text("SELECT habitability_probability FROM exoplanets;"),conn)#fetching habitability probabilities from exoplanets table
-            
-            return jsonify({
-                "scores":df['habitability_probability'].dropna().tolist() #converting series to list to send as json response
-            })
+        df = fetch_df("SELECT habitability_probability FROM exoplanets;")
+
+        return jsonify({
+            "scores": df["habitability_probability"].dropna().tolist()
+        })
     except Exception as e:
         print(f"❌ Query failed: {e}")
         return jsonify({"error": "Failed to fetch score distribution"}), 500
@@ -451,19 +454,18 @@ def score_distribution():
 #WHY correlations? to analyze relationships between features and habitability scores
 def correlations():
     try:
-        with engine.connect() as conn:
-            df = pd.read_sql(text("""
-                SELECT radius,mass,temp,orbital_period,distance_star,
-                       star_temp,eccentricity,semi_major_axis,habitability_probability 
-                FROM exoplanets
-            """), conn)
+        df = fetch_df("""
+            SELECT radius,mass,temp,orbital_period,distance_star,
+                   star_temp,eccentricity,semi_major_axis,habitability_probability 
+            FROM exoplanets
+        """)
 
-            corr = df.corr().round(3).fillna(0)
+        corr = df.corr().round(3).fillna(0)
 
-            return jsonify({
-                "labels": corr.columns.tolist(),
-                "matrix": corr.values.tolist()
-            })
+        return jsonify({
+            "labels": corr.columns.tolist(),
+            "matrix": corr.values.tolist()
+        })
     except Exception as e:
         print(f"❌ Query failed: {e}")
         return jsonify({"error": "Failed to fetch correlations"}), 500
@@ -474,24 +476,23 @@ def export():
     from openpyxl import Workbook #importing openpyxl to create excel files
     
     try:
-        with engine.connect() as conn:
-            df=pd.read_sql(text("SELECT * FROM exoplanets ORDER BY habitability_probability DESC LIMIT 10;"),conn) 
-            #fetching top 10 exoplanets based on habitability probability
-            
-            wb=Workbook() #creating workbook object to hold excel data
-            ws=wb.active #getting active worksheet from workbook
-            ws.title="Top 10 Habitable Exoplanets" #setting worksheet title
-            
-            ws.append(df.columns.tolist()) #adding header row with column names
-            for row in df.itertuples(index=False): #iterating over dataframe rows without index
-                #itertuples returns namedtuples for each row
-                #example: Row(id=1,radius=1.5,mass=2.0,...)
-                ws.append(list(row)) #adding each row to worksheet
-                
-            file_path = "static/top_10_habitable_exoplanets.xlsx" #file path to save excel file
-            wb.save(file_path) #saving workbook to file
-            
-            return send_file(file_path,as_attachment=True) #sending file as attachment for download
+        df = fetch_df("SELECT * FROM exoplanets ORDER BY habitability_probability DESC LIMIT 10;")
+        #fetching top 10 exoplanets based on habitability probability
+
+        wb=Workbook() #creating workbook object to hold excel data
+        ws=wb.active #getting active worksheet from workbook
+        ws.title="Top 10 Habitable Exoplanets" #setting worksheet title
+
+        ws.append(df.columns.tolist()) #adding header row with column names
+        for row in df.itertuples(index=False): #iterating over dataframe rows without index
+            #itertuples returns namedtuples for each row
+            #example: Row(id=1,radius=1.5,mass=2.0,...)
+            ws.append(list(row)) #adding each row to worksheet
+
+        file_path = "static/top_10_habitable_exoplanets.xlsx" #file path to save excel file
+        wb.save(file_path) #saving workbook to file
+
+        return send_file(file_path,as_attachment=True) #sending file as attachment for download
     except Exception as e:
         print(f"❌ Export failed: {e}")
         return jsonify({"error": "Failed to export data"}), 500
@@ -508,19 +509,18 @@ def export_pdf():
     #A4 is a standard page size for documents
     
     try:
-        with engine.connect() as conn:
-            df=pd.read_sql(text("SELECT * FROM exoplanets ORDER BY habitability_probability DESC LIMIT 10;"),conn)
-            
-            doc=SimpleDocTemplate("static/top_10_habitable_exoplanets.pdf",pagesize=A4)
-            table=Table([df.columns.tolist()]+ df.values.tolist())
-            #what does the above line mean?
-            #it creates a table with header row as column names and data rows as exoplanet data
-            # df.columns.tolist() + df.values.tolist() creates a list of lists where first inner list is header row and rest are data rows
-            #example: [["col1","col2",...],["data1_row1","data2_row1",...],...]
-            
-            doc.build([table]) #building pdf document with the table
-            
-            return send_file("static/top_10_habitable_exoplanets.pdf",as_attachment=True) #sending pdf file as attachment for download
+        df = fetch_df("SELECT * FROM exoplanets ORDER BY habitability_probability DESC LIMIT 10;")
+
+        doc=SimpleDocTemplate("static/top_10_habitable_exoplanets.pdf",pagesize=A4)
+        table=Table([df.columns.tolist()]+ df.values.tolist())
+        #what does the above line mean?
+        #it creates a table with header row as column names and data rows as exoplanet data
+        # df.columns.tolist() + df.values.tolist() creates a list of lists where first inner list is header row and rest are data rows
+        #example: [["col1","col2",...],["data1_row1","data2_row1",...],...]
+
+        doc.build([table]) #building pdf document with the table
+
+        return send_file("static/top_10_habitable_exoplanets.pdf",as_attachment=True) #sending pdf file as attachment for download
     except Exception as e:
         print(f"❌ PDF Export failed: {e}")
         return jsonify({"error": "Failed to export PDF"}), 500
